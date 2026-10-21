@@ -11,7 +11,8 @@
  *   WAIT_MS=40000  # how long to wait for background processing (default 40s)
  *
  * Exit code 0 = all checks passed, 1 = at least one failed (usable in CI).
- * Note: latency is measured from where you run it, so it includes network distance.
+ * Latency is reported twice: "server-side" (from the API's Server-Timing header) and
+ * "end-to-end" (measured here, so it includes the network distance to the server).
  */
 const API = (process.env.API_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const WAIT_MS = Number(process.env.WAIT_MS ?? 40_000);
@@ -32,8 +33,16 @@ async function call(method, path, body) {
   });
   const ms = performance.now() - t0;
   const text = await res.text();
-  return { status: res.status, ms, body: text ? JSON.parse(text) : null };
+  // Time the API itself reported (Server-Timing: app;dur=4.8), separate from network time.
+  const serverMs = Number(/dur=([\d.]+)/.exec(res.headers.get('server-timing') ?? '')?.[1] ?? NaN);
+  return { status: res.status, ms, serverMs, body: text ? JSON.parse(text) : null };
 }
+
+/** "max 707ms, p50 644ms" for a list of durations. */
+const summarize = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return { max: sorted.at(-1), p50: sorted[Math.floor(sorted.length / 2)] };
+};
 
 const payload = (id) => ({
   transaction_id: id,
@@ -53,7 +62,11 @@ check(health.status === 200 && health.body.status === 'HEALTHY', `GET / -> ${JSO
 
 console.log('\n2. Single transaction');
 const r1 = await call('POST', '/v1/webhooks/transactions', payload(single));
-check(r1.status === 202, `202 Accepted (got ${r1.status}) in ${r1.ms.toFixed(0)}ms`);
+check(
+  r1.status === 202,
+  `202 Accepted (got ${r1.status}) in ${r1.ms.toFixed(0)}ms` +
+    (Number.isFinite(r1.serverMs) ? ` (server ${r1.serverMs.toFixed(1)}ms)` : ''),
+);
 const q1 = await call('GET', `/v1/transactions/${single}`);
 check(q1.body[0]?.status === 'PROCESSING', `status right after webhook = ${q1.body[0]?.status}`);
 
@@ -66,9 +79,21 @@ console.log('\n4. Performance (50 concurrent different webhooks)');
 const load = await Promise.all(
   Array.from({ length: 50 }, (_, i) => call('POST', '/v1/webhooks/transactions', payload(`txn_smoke_load_${run}_${i}`))),
 );
-const times = load.map((r) => r.ms).sort((a, b) => a - b);
 check(load.every((r) => r.status === 202), 'all 50 answered 202');
-check(times.at(-1) < 500, `max latency ${times.at(-1).toFixed(0)}ms, p50 ${times[25].toFixed(0)}ms (< 500ms)`);
+// Two separate numbers, so a failure can be attributed correctly:
+//  - server-side: time spent inside the API (from the Server-Timing header)
+//  - end-to-end:  full round trip from this machine, including network distance to the server
+const server = summarize(load.map((r) => r.serverMs));
+const total = summarize(load.map((r) => r.ms));
+if (Number.isFinite(server.max)) {
+  check(server.max < 500, `server-side: max ${server.max.toFixed(1)}ms, p50 ${server.p50.toFixed(1)}ms (< 500ms)`);
+} else {
+  console.log('  INFO  no Server-Timing header (older server version?), skipping server-side check');
+}
+check(
+  total.max < 500,
+  `end-to-end from this machine (incl. network): max ${total.max.toFixed(0)}ms, p50 ${total.p50.toFixed(0)}ms (< 500ms)`,
+);
 
 console.log('\n5. Validation');
 const bad = await call('POST', '/v1/webhooks/transactions', { transaction_id: 'x' });
