@@ -3,8 +3,12 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "target": "ES2022",
-    "lib": ["ES2022"],
-    "types": ["node"],
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ],
     "rootDir": "./src",
     "outDir": "./dist",
     "emitDecoratorMetadata": true,
@@ -13,10 +17,13 @@
     "removeComments": true,
     "sourceMap": true,
     "skipLibCheck": true,
-    "strict": false,
-    "strictNullChecks": true,
-    "noImplicitAny": true,
-    "ignoreDeprecations": "6.0"
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "strictPropertyInitialization": false,
+    "noUnusedLocals": true,
+    "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*"]
+  "include": [
+    "src/**/*"
+  ]
 }

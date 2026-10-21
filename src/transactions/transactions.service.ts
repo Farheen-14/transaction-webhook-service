@@ -1,39 +1,25 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
+import { errorMessage, withTimeout } from '../common/async.utils.js';
+import { isUniqueViolation } from '../common/db-errors.js';
 import { config } from '../config.js';
+import { TransactionView, toTransactionView } from './dto/transaction-view.dto.js';
 import { TransactionWebhookDto } from './dto/transaction-webhook.dto.js';
-import { Transaction, TransactionStatus } from './transaction.entity.js';
 import { TransactionProcessor } from './transaction-processor.service.js';
+import { Transaction, TransactionStatus } from './transaction.entity.js';
 
-export interface TransactionView {
-  transaction_id: string;
-  source_account: string;
-  destination_account: string;
-  amount: number;
-  currency: string;
-  status: TransactionStatus;
-  created_at: string;
-  processed_at: string | null;
-  attempts: number;
-  last_error: string | null;
+/** Result of ingesting a webhook: `duplicate` is true when the transaction_id was seen before. */
+export interface IngestResult {
+  duplicate: boolean;
 }
 
-const isUniqueViolation = (err: unknown): boolean => {
-  if (!(err instanceof QueryFailedError)) return false;
-  const code = (err.driverError as { code?: string } | undefined)?.code;
-  return code === 'ER_DUP_ENTRY' /* MySQL */ || code === '23505' /* Postgres */;
-};
-
-const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> =>
-  new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
-    promise.then(
-      (value) => (clearTimeout(timer), resolve(value)),
-      (err) => (clearTimeout(timer), reject(err)),
-    );
-  });
-
+/**
+ * Business logic for receiving webhooks and reading transactions.
+ *
+ * Processing itself lives in TransactionProcessor; this service only records work and reads state,
+ * which is what keeps the webhook endpoint fast.
+ */
 @Injectable()
 export class TransactionsService {
   private readonly logger = new Logger(TransactionsService.name);
@@ -44,10 +30,17 @@ export class TransactionsService {
   ) {}
 
   /**
-   * Durably records the webhook and returns immediately; processing happens in the background.
-   * Idempotent: a repeated transaction_id hits the UNIQUE constraint and is reported as a duplicate.
+   * Durably records a webhook and returns immediately; the 30s processing happens later.
+   *
+   * Steps:
+   *  1. INSERT the row with status PROCESSING (a single fast query, bounded by a timeout).
+   *  2. If the INSERT hits the UNIQUE constraint, this transaction_id was already received:
+   *     report it as a duplicate instead of an error (idempotency).
+   *  3. Any other failure becomes 503 so the processor retries. We never acknowledge a webhook
+   *     we have not stored, otherwise a transaction could be lost.
+   *  4. Nudge the worker so it starts right away instead of waiting for its next poll.
    */
-  async ingest(dto: TransactionWebhookDto): Promise<{ duplicate: boolean }> {
+  async ingest(dto: TransactionWebhookDto): Promise<IngestResult> {
     try {
       await withTimeout(
         this.repo.insert({
@@ -65,9 +58,7 @@ export class TransactionsService {
         this.logger.log(`Duplicate webhook ignored: ${dto.transaction_id}`);
         return { duplicate: true };
       }
-      // We never acknowledge what we haven't stored: a 503 makes the processor retry,
-      // and the retry is safe because ingestion is idempotent.
-      this.logger.error(`Could not persist ${dto.transaction_id}: ${(err as Error).message}`);
+      this.logger.error(`Could not persist ${dto.transaction_id}: ${errorMessage(err)}`);
       throw new ServiceUnavailableException('Could not record webhook, please retry');
     }
 
@@ -75,28 +66,18 @@ export class TransactionsService {
     return { duplicate: false };
   }
 
+  /**
+   * Looks up one transaction. Returns an array (as the spec's example response does):
+   * one element when found, empty when the ID is unknown.
+   */
   async findByTransactionId(transactionId: string): Promise<TransactionView[]> {
     const tx = await this.repo.findOne({ where: { transactionId } });
-    return tx ? [toView(tx)] : [];
+    return tx ? [toTransactionView(tx)] : [];
   }
 
+  /** Most recent transactions first; used by the dashboard. */
   async listRecent(limit: number): Promise<TransactionView[]> {
     const rows = await this.repo.find({ order: { createdAt: 'DESC', id: 'DESC' }, take: limit });
-    return rows.map(toView);
+    return rows.map(toTransactionView);
   }
-}
-
-function toView(tx: Transaction): TransactionView {
-  return {
-    transaction_id: tx.transactionId,
-    source_account: tx.sourceAccount,
-    destination_account: tx.destinationAccount,
-    amount: tx.amount,
-    currency: tx.currency,
-    status: tx.status,
-    created_at: tx.createdAt.toISOString(),
-    processed_at: tx.processedAt ? tx.processedAt.toISOString() : null,
-    attempts: tx.attempts,
-    last_error: tx.lastError,
-  };
 }

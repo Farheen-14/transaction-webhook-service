@@ -5,9 +5,9 @@
   "description": "Receives payment-processor transaction webhooks, acks in <500ms and processes them reliably in the background",
   "scripts": {
     "build": "nest build",
-    "start": "node dist/main",
+    "start": "node dist/main.js",
     "start:dev": "nest start --watch",
-    "test:e2e": "node scripts/smoke-test.mjs"
+    "test:smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.2.0",
@@ -29,5 +29,8 @@
     "@types/node": "^26.6.5",
     "typescript": "^6.0.3"
   },
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  }
 }

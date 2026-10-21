@@ -1,5 +1,18 @@
-// End-to-end check of the success criteria against a running service.
-// Usage: API_URL=https://your-api.example.com node scripts/smoke-test.mjs
+/**
+ * End-to-end smoke test of the assignment's success criteria against a RUNNING service.
+ *
+ * Checks: health endpoint, single transaction (202 -> PROCESSING -> PROCESSED after ~30s),
+ * duplicate prevention (10 concurrent identical webhooks -> one row, processed once),
+ * performance (50 concurrent webhooks, each must answer in < 500ms), and input validation.
+ *
+ * Usage:
+ *   node scripts/smoke-test.mjs                                   # http://localhost:3000
+ *   API_URL=https://your-api.example.com node scripts/smoke-test.mjs
+ *   WAIT_MS=40000  # how long to wait for background processing (default 40s)
+ *
+ * Exit code 0 = all checks passed, 1 = at least one failed (usable in CI).
+ * Note: latency is measured from where you run it, so it includes network distance.
+ */
 const API = (process.env.API_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const WAIT_MS = Number(process.env.WAIT_MS ?? 40_000);
 
